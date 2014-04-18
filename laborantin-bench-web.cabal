@@ -2,7 +2,7 @@
 --  documentation, see http://haskell.org/cabal/users-guide/
 
 name:                laborantin-bench-web
-version:             0.1.0.0
+version:             0.1.0.1
 synopsis:            Benchmarks for webservers.
 -- description:         
 license:             Apache-2.0
@@ -22,7 +22,7 @@ executable laborantin-bench-web
   build-depends:       base >=4.7 && <4.8,
                        laborantin-hs >= 0.1.5.0 && < 0.2,
                        transformers >= 0.3 && < 0.4,
-                       text >= 0.11 && < 0.12,
+                       text >= 0.11 && < 1.2,
                        process >= 1.2 && < 1.3
   -- hs-source-dirs:      
   default-language:    Haskell2010
