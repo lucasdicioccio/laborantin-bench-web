@@ -14,6 +14,7 @@ import qualified Data.Text.IO as T
 import Laborantin.DSL
 import Laborantin.Types
 import Laborantin.Implementation
+import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Exception (catch, IOException (..))
 
@@ -25,6 +26,8 @@ type URL = Text
 type IterationCount = Int
 type ConcurrencyLevel = Int
 type ProcessCount = Int
+type RAM = Int
+type GenerationsNumber = Int
 
 {- Process handling -}
 
@@ -67,23 +70,31 @@ shellCommand name cmd args = do
 
                   let terminator term = do
                           dbg $ terminateMessage term
-                          liftIO $ do
-                            terminateAction term pHandle
-                            mapM_ hClose [cmdOut, cmdErr] 
+                          liftIO $ void (terminateAction term pHandle)
+                            -- mapM_ hClose [cmdOut, cmdErr] 
 
+                  liftIO $ mapM_ hClose [cmdOut, cmdErr] 
                   return terminator
 
 {- Server-side -}
 
-data Server = Mighty ConcurrencyLevel
+data GC = GC RAM GenerationsNumber
+  deriving (Show)
+
+data Server = Mighty ConcurrencyLevel GC
   deriving (Show)
 
 httpServerShellCommand :: Server -> (Text, [Text])
-httpServerShellCommand (Mighty conc) = ("mighty", ["+RTS"
+httpServerShellCommand (Mighty conc (GC ram gens)) = ("mighty", ["+RTS"
+                                                  , "-A" <> T.pack (show ram) <> "M"
+                                                  , "-G" <> T.pack (show gens)
                                                   , "-N" <> T.pack (show conc)
                                                   , "-RTS"])
 
 httpServerParams = do
+
+  ghcRTSParams
+
   parameter "server-name" $ do 
     describe "Name of the server to use."
     values [str "mighty"]
@@ -92,11 +103,23 @@ httpServerParams = do
     describe "Number of concurrent server processes."
     values [num 1]
 
+ghcRTSParams = do
+
+  parameter "gc-area-size" $ do 
+    describe "Initial RAM passed to the RTS (in MB)"
+    values [num 4]
+
+  parameter "gc-generations" $ do 
+    describe "Number of garbage-collector generations"
+    values [num 2]
+
 httpServer = do
   (StringParam name) <- param "server-name"
+  (NumberParam ram)  <- param "gc-area-size"
+  (NumberParam gens)  <- param "gc-generations"
   (NumberParam conc) <- param "server-concurrency"
   case name of
-    "mighty"  -> return $ Mighty (round conc)
+    "mighty"  -> return $ Mighty (round conc) (GC (round gens) (round ram))
     _         -> error "unknwon server name"
 
 {- Client-side -}
