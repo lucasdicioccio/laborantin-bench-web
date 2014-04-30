@@ -71,7 +71,6 @@ shellCommand name cmd args = do
                   let terminator term = do
                           dbg $ terminateMessage term
                           liftIO $ void (terminateAction term pHandle)
-                            -- mapM_ hClose [cmdOut, cmdErr] 
 
                   liftIO $ mapM_ hClose [cmdOut, cmdErr] 
                   return terminator
@@ -162,6 +161,22 @@ httpClient = do
     "weighttp"  -> return $ Weighttp url (round reqs) (round conc) (round procs)
     _           -> error "unknwon server name"
 
+{- analysis -}
+
+parseClientResults :: Client -> Step EnvIO ()
+parseClientResults (Weighttp _ _ _ _) = do
+  content <- pRead =<< result "client-process.out"
+  (liftIO . print) =<< eParamSet <$> self
+  liftIO . print $ parse content
+  where parse content = (,) <$> rps <*> statuses
+              where lines = T.lines content
+                    findLine fstWord = filter ((fstWord ==) . (T.take (T.length fstWord))) lines
+                    findLine' fstWord = if length (findLine fstWord) == 1
+                                        then Just (findLine fstWord !! 0)
+                                        else Nothing
+                    rps = T.words <$> findLine' "finished"
+                    statuses = T.words <$> findLine' "status"
+
 {- actual experiment -}
 
 benchWeb :: ScenarioDescription EnvIO
@@ -179,3 +194,5 @@ benchWeb = scenario "bench-web" $ do
     endClient <- shellCommand "client-process" cliCmd cliCmdArgs
 
     endClient Wait >> endServer Kill
+  analyze $ do
+    httpClient >>= parseClientResults 
