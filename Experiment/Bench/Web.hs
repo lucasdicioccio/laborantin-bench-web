@@ -9,6 +9,7 @@ module Experiment.Bench.Web (
 import Data.Monoid (mconcat, (<>))
 import Control.Applicative ((<$>), (<*>))
 import Data.Text (Text)
+import Data.Text.Read (decimal)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import Laborantin.DSL
@@ -163,19 +164,29 @@ httpClient = do
 
 {- analysis -}
 
-parseClientResults :: Client -> Step EnvIO ()
+data HttpPerformance = HttpPerformance {
+    requestsPerSeconds  :: Int
+  , nSuccessfulRequests :: Int
+  } deriving (Show)
+
+parseClientResults :: Client -> Step EnvIO (Maybe HttpPerformance)
 parseClientResults (Weighttp _ _ _ _) = do
   content <- pRead =<< result "client-process.out"
-  (liftIO . print) =<< eParamSet <$> self
-  liftIO . print $ parse content
-  where parse content = (,) <$> rps <*> statuses
+  return $ parse content
+  where parse content = HttpPerformance <$> rps <*> statuses
               where lines = T.lines content
                     findLine fstWord = filter ((fstWord ==) . (T.take (T.length fstWord))) lines
                     findLine' fstWord = if length (findLine fstWord) == 1
                                         then Just (findLine fstWord !! 0)
                                         else Nothing
-                    rps = T.words <$> findLine' "finished"
-                    statuses = T.words <$> findLine' "status"
+                    safeAtIndex n xs = if length xs >= (n+1)
+                                       then Just (xs !! n)
+                                       else Nothing
+                    safeParseInt txt = either (const Nothing) (Just . fst) (decimal txt)
+                    rps = findLine' "finished" >>= safeAtIndex 9 . T.words >>= safeParseInt
+                    statuses = findLine' "status" >>= safeAtIndex 2 . T.words >>= safeParseInt
+
+
 
 {- actual experiment -}
 
@@ -195,4 +206,4 @@ benchWeb = scenario "bench-web" $ do
 
     endClient Wait >> endServer Kill
   analyze $ do
-    httpClient >>= parseClientResults 
+    liftIO . print =<< parseClientResults =<< httpClient
