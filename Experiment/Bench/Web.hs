@@ -1,14 +1,21 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 {- Please read http://gwan.com/en_apachebench_httperf.html -}
 
 module Experiment.Bench.Web (
-  benchWeb
+    benchWeb
+  , plotWeb
 ) where
 
+import Data.Csv (ToNamedRecord (..), toField, namedRecord, namedField, (.=), encodeByName)
 import Data.Monoid (mconcat, (<>))
 import Control.Applicative ((<$>), (<*>))
 import Data.Text (Text)
+import Data.Text.Lazy.Encoding (decodeUtf8)
+import Data.Text.Encoding (encodeUtf8)
+import Data.Text.Lazy (toStrict)
 import Data.Text.Read (decimal)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
@@ -18,6 +25,9 @@ import Laborantin.Implementation
 import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Exception (catch, IOException (..))
+import Data.Maybe (catMaybes)
+import qualified Data.Map as M
+import qualified Data.Vector as V
 
 import System.Process (createProcess, proc, terminateProcess, waitForProcess, CreateProcess (..), StdStream (..) )
 import System.IO (hClose, openFile, IOMode (..))
@@ -169,11 +179,18 @@ data HttpPerformance = HttpPerformance {
   , nSuccessfulRequests :: Int
   } deriving (Show)
 
+instance ToNamedRecord (Maybe HttpPerformance) where
+  toNamedRecord (Just (HttpPerformance rps n)) = namedRecord [
+                                        "rps" .= rps, "n.successes" .= n]
+  toNamedRecord Nothing = namedRecord []
+
 parseClientResults :: Client -> Step EnvIO (Maybe HttpPerformance)
 parseClientResults (Weighttp _ _ _ _) = do
   content <- pRead =<< result "client-process.out"
-  return $ parse content
-  where parse content = HttpPerformance <$> rps <*> statuses
+  return $ parseWeighttpOutput content
+
+parseWeighttpOutput :: Text -> Maybe HttpPerformance
+parseWeighttpOutput content = HttpPerformance <$> rps <*> statuses
               where lines = T.lines content
                     findLine fstWord = filter ((fstWord ==) . (T.take (T.length fstWord))) lines
                     findLine' fstWord = if length (findLine fstWord) == 1
@@ -200,10 +217,67 @@ benchWeb = scenario "bench-web" $ do
     (srvCmd, srvCmdArgs) <- httpServerShellCommand <$> httpServer
     endServer <- shellCommand "server-process" srvCmd srvCmdArgs
 
+    -- cheat to make sure that the server is ready
+    dbg "waiting half a second"
+    liftIO $ threadDelay 500000
+
     dbg "starting client"
     (cliCmd, cliCmdArgs) <- httpClientShellCommand <$> httpClient
     endClient <- shellCommand "client-process" cliCmd cliCmdArgs
 
     endClient Wait >> endServer Kill
+
   analyze $ do
     liftIO . print =<< parseClientResults =<< httpClient
+
+{- analysis -}
+
+
+instance ToNamedRecord ParameterSet where
+  toNamedRecord prms = let pairs = M.toList prms
+                           validPairs = filter (isRecord . snd) pairs in
+    namedRecord $ map toBSpair validPairs
+  -- map toRecordPair . filter _ prms
+    where isRecord (NumberParam _) = True
+          isRecord (StringParam _) = True
+          isRecord _               = False
+
+          toBSpair (k, StringParam v) = namedField (encodeUtf8 k) v
+          toBSpair (k, NumberParam v) = let v' = fromRational v :: Double
+                                        in namedField (encodeUtf8 k) v'
+
+plotWeb :: ScenarioDescription EnvIO
+plotWeb = scenario "plot-web" $ do
+  describe "Plots the results for the web server benchmarks"
+  require benchWeb "@sc.param 'client-name' == 'weighttp'"
+  -- todo: autogenerate this kind of scenario
+  -- basically we need a list of params to cherry-pick, the ancestor path, and
+  -- a function to turn an ancestor to a (list of) ToNamedRecord instance
+  run $ do
+    b <- backend
+    ancestors <- eAncestors <$> self
+    results <- map transform <$> mapM (extract b) ancestors
+    let header = V.fromList ["scenario.path"
+              , "server-name"
+              , "server-concurrency"
+              , "gc-area-size"
+              , "gc-generations"
+              , "client-name"
+              , "client-concurrency"
+              , "client-processes"
+              , "requests-count"
+              , "probed-url"
+              , "rps"
+              , "n.successes"
+              ]
+
+    writeResult "aggregate-csv" (toStrict . decodeUtf8 $ encodeByName header results)
+    where extract b exec = do
+                out <- pRead =<< (bResult b exec "client-process.out")
+                let path = ePath exec
+                let prms = eParamSet exec
+                let perf = parseWeighttpOutput out
+                return (path, prms, perf)
+          transform (path, prms, perf) = let pathRecord = namedRecord [
+                                                "scenario.path" .= path]
+                          in pathRecord <> toNamedRecord prms <> toNamedRecord perf
