@@ -22,13 +22,15 @@ import qualified Data.Text.IO as T
 import Laborantin.DSL
 import Laborantin.Types
 import Laborantin.Implementation
-import Control.Monad (void)
+import Control.Monad (void, liftM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Exception (catch, IOException (..))
 import Data.Maybe (catMaybes)
 import qualified Data.Map as M
 import qualified Data.Vector as V
 
+import System.Directory (copyFile)
+import System.FilePath.Posix ((</>))
 import System.Process (createProcess, proc, terminateProcess, waitForProcess, CreateProcess (..), StdStream (..) )
 import System.IO (hClose, openFile, IOMode (..))
 import Control.Concurrent (threadDelay)
@@ -44,8 +46,8 @@ type GenerationsNumber = Int
 
 data Termination = Kill | Wait 
 
-shellCommand name cmd args = do
-  let dir = Nothing
+shellCommand name cmd args chdir = do
+  dir <- if chdir then Just . ePath <$> self else return Nothing
   let env = Nothing
   let cmd' = T.unpack cmd
   let args' = map T.unpack args
@@ -61,6 +63,7 @@ shellCommand name cmd args = do
 
   let action = createProcess (proc cmd' args') { std_out = UseHandle cmdOut
                                                , std_err = UseHandle cmdErr
+                                               , cwd = dir
                                                }
 
   dbg $ "executing " <> name <> " with `" <> cmd <> "` " <> T.pack (show args)
@@ -215,7 +218,7 @@ benchWeb = scenario "bench-web" $ do
   run $ do
     dbg "starting server"
     (srvCmd, srvCmdArgs) <- httpServerShellCommand <$> httpServer
-    endServer <- shellCommand "server-process" srvCmd srvCmdArgs
+    endServer <- shellCommand "server-process" srvCmd srvCmdArgs False
 
     -- cheat to make sure that the server is ready
     dbg "waiting half a second"
@@ -223,7 +226,7 @@ benchWeb = scenario "bench-web" $ do
 
     dbg "starting client"
     (cliCmd, cliCmdArgs) <- httpClientShellCommand <$> httpClient
-    endClient <- shellCommand "client-process" cliCmd cliCmdArgs
+    endClient <- shellCommand "client-process" cliCmd cliCmdArgs False
 
     endClient Wait >> endServer Kill
 
@@ -254,6 +257,16 @@ plotWeb = scenario "plot-web" $ do
   -- basically we need a list of params to cherry-pick, the ancestor path, and
   -- a function to turn an ancestor to a (list of) ToNamedRecord instance
   run $ do
+    generateAggregateCSV
+    runPlots
+
+runPlots = do
+  destPath <- liftM (\x -> ePath x </> "plot.R") self
+  let srcPath = "./scripts/r/plot-web/plot.R" 
+  liftIO $ copyFile srcPath destPath
+  shellCommand "rplots" "R" ["-f", "plot.R"] True >>= ($ Wait)
+
+generateAggregateCSV = do
     b <- backend
     ancestors <- eAncestors <$> self
     results <- map transform <$> mapM (extract b) ancestors
