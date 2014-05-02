@@ -18,6 +18,10 @@ Make sure that `weighttp` and `mighty` are in your `$PATH` environment variable.
   * http://hackage.haskell.org/package/mighttpd2 , an HTTP server written in
     Haskell, like cabal
 
+To analyze results and generate a plot, you'll further need R and ggplot2. On
+Debian you have package for both (r-base, and r-cran-ggplot2). This is not
+mandatory to run the benchmarks, only to analyze results.
+
 Furthermore, your TCP stack should let you open many TCP connections in a short
 amount of time for actual benchmarks. If you are not familiar with TCP tuning,
 please read http://gwan.com/en_apachebench_httperf.html .
@@ -39,16 +43,18 @@ please read http://gwan.com/en_apachebench_httperf.html .
   ./dist/build/laborantin-bench-web/laborantin-bench-web run -m "@sc.param 'requests-count' == 50000 and \
                                                                  @sc.param 'client-concurrency' in [20,50,100] and \
                                                                  @sc.param 'client-processes' in [1,2,3,4,5,6,7,8] and \
-                                                                 @sc.param 'server-concurrency' in [1,2,3,4,5,6,7,8]"
+                                                                 @sc.param 'server-concurrency' in [1,2,3,4,5,6,7,8]" \
+                                                             -s bench-web
 
   # find where some experiments with enough server concurrency
   ./dist/build/laborantin-bench-web/laborantin-bench-web find -m "@sc.param 'server-concurrency' >= 2"
+
+  # plots some results
+  ./dist/build/laborantin-bench-web/laborantin-bench-web run -s plot-web
 ```
 
 ## Todo
 
 We should do a bit more:
-  * generate index.html in the experiment directory and pass this as CWD when
-    spawning the mighty server process
+  * generate index.html in the experiment directory
   * add other webservers for a comparison
-  * parse and plot results comparing servers and parameter sets
