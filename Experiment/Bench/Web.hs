@@ -28,6 +28,7 @@ import Control.Exception (catch, IOException (..))
 import Data.Maybe (catMaybes)
 import qualified Data.Map as M
 import qualified Data.Vector as V
+import qualified Data.Set as S
 
 import System.Directory (copyFile)
 import System.FilePath.Posix ((</>))
@@ -254,10 +255,8 @@ plotWeb = scenario "plot-web" $ do
   describe "Plots the results for the web server benchmarks"
   require benchWeb "@sc.param 'client-name' == 'weighttp'"
   -- todo: autogenerate this kind of scenario
-  -- basically we need a list of params to cherry-pick, the ancestor path, and
-  -- a function to turn an ancestor to a (list of) ToNamedRecord instance
   run $ do
-    generateAggregateCSV
+    aggregateCSV "performance.csv" "client-process.out" parseWeighttpOutput ["rps" , "n.successes"]
     runPlots
 
 runPlots = do
@@ -266,31 +265,23 @@ runPlots = do
   liftIO $ copyFile srcPath destPath
   shellCommand "rplots" "R" ["-f", "plot.R"] True >>= ($ Wait)
 
-generateAggregateCSV = do
+paramNames = S.fromList . concatMap (\e -> M.keys $ eParamSet e)
+
+headerNames extras = 
+    fmap encodeUtf8 . V.fromList . S.toList . S.union (S.fromList extras) . paramNames
+
+aggregateCSV res srcRes parser keys = do
     b <- backend
     ancestors <- eAncestors <$> self
-    results <- map transform <$> mapM (extract b) ancestors
-    let header = V.fromList ["scenario.path"
-              , "server-name"
-              , "server-concurrency"
-              , "gc-area-size"
-              , "gc-generations"
-              , "client-name"
-              , "client-concurrency"
-              , "client-processes"
-              , "requests-count"
-              , "probed-url"
-              , "rps"
-              , "n.successes"
-              ]
-
-    writeResult "aggregate-csv" (toStrict . decodeUtf8 $ encodeByName header results)
+    let header = headerNames ("scenario.path":keys) ancestors
+    dump header =<< map transform <$> mapM (extract b) ancestors
     where extract b exec = do
-                out <- pRead =<< (bResult b exec "client-process.out")
-                let path = ePath exec
-                let prms = eParamSet exec
-                let perf = parseWeighttpOutput out
-                return (path, prms, perf)
-          transform (path, prms, perf) = let pathRecord = namedRecord [
-                                                "scenario.path" .= path]
-                          in pathRecord <> toNamedRecord prms <> toNamedRecord perf
+            out <- pRead =<< (bResult b exec srcRes)
+            let path = ePath exec
+            let prms = eParamSet exec
+            let parsed = parser out
+            return (path, prms, parsed)
+          transform (path, prms, parsed) =
+            let pathRecord = namedRecord ["scenario.path" .= path]
+            in pathRecord <> toNamedRecord prms <> toNamedRecord parsed
+          dump header = writeResult res . toStrict . decodeUtf8 . encodeByName header 
