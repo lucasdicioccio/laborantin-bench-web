@@ -9,32 +9,27 @@ module Experiment.Bench.Web (
   , plotWeb
 ) where
 
-import Data.Csv (ToNamedRecord (..), toField, namedRecord, namedField, (.=), encodeByName)
-import Data.Monoid (mconcat, (<>))
+import Data.Csv (ToNamedRecord (..), namedRecord, (.=))
+import Data.Monoid ((<>))
 import Control.Applicative ((<$>), (<*>))
 import Data.Text (Text)
-import Data.Text.Lazy.Encoding (decodeUtf8)
-import Data.Text.Encoding (encodeUtf8)
-import Data.Text.Lazy (toStrict)
 import Data.Text.Read (decimal)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import Laborantin.DSL
 import Laborantin.Types
-import Laborantin.Implementation
+import Laborantin.Implementation (EnvIO)
 import Control.Monad (void, liftM)
 import Control.Monad.IO.Class (liftIO)
-import Control.Exception (catch, IOException (..))
 import Data.Maybe (catMaybes)
 import qualified Data.Map as M
-import qualified Data.Vector as V
-import qualified Data.Set as S
 
 import System.Directory (copyFile)
 import System.FilePath.Posix ((</>))
-import System.Process (createProcess, proc, terminateProcess, waitForProcess, CreateProcess (..), StdStream (..) )
-import System.IO (hClose, openFile, IOMode (..))
 import Control.Concurrent (threadDelay)
+
+import Experiment.Bench.CSV
+import Experiment.Bench.Process
 
 type URL = Text
 type IterationCount = Int
@@ -42,53 +37,6 @@ type ConcurrencyLevel = Int
 type ProcessCount = Int
 type RAM = Int
 type GenerationsNumber = Int
-
-{- Process handling -}
-
-data Termination = Kill | Wait 
-
-shellCommand name cmd args chdir = do
-  dir <- if chdir then Just . ePath <$> self else return Nothing
-  let env = Nothing
-  let cmd' = T.unpack cmd
-  let args' = map T.unpack args
-
-  outRes <- result (T.unpack $ name <> ".out")
-  errRes <- result (T.unpack $ name <> ".err")
-
-  let outPath = pPath outRes
-  let errPath = pPath errRes
-
-  cmdOut <- liftIO $ openFile outPath WriteMode
-  cmdErr <- liftIO $ openFile errPath WriteMode
-
-  let action = createProcess (proc cmd' args') { std_out = UseHandle cmdOut
-                                               , std_err = UseHandle cmdErr
-                                               , cwd = dir
-                                               }
-
-  dbg $ "executing " <> name <> " with `" <> cmd <> "` " <> T.pack (show args)
-  proc <- liftIO $ ((Right <$> action) `catch` (\e -> return $ Left (e :: IOException)))
-  case proc of
-            Left _ -> do
-                  dbg $ "IOException with " <> name <> ", ensure you have " <> name <> " in your $PATH"
-                  err $ "IOException with " ++ T.unpack name
-                  return (\_ -> return ())
-
-            Right (Nothing, Nothing, Nothing, pHandle) -> do
-
-                  let terminateMessage Kill = "terminating " <> name
-                      terminateMessage Wait = "waiting for " <> name
-
-                  let terminateAction Kill handle = terminateProcess handle >> waitForProcess handle
-                      terminateAction Wait handle = waitForProcess handle
-
-                  let terminator term = do
-                          dbg $ terminateMessage term
-                          liftIO $ void (terminateAction term pHandle)
-
-                  liftIO $ mapM_ hClose [cmdOut, cmdErr] 
-                  return terminator
 
 {- Server-side -}
 
@@ -219,7 +167,7 @@ benchWeb = scenario "bench-web" $ do
   run $ do
     dbg "starting server"
     (srvCmd, srvCmdArgs) <- httpServerShellCommand <$> httpServer
-    endServer <- shellCommand "server-process" srvCmd srvCmdArgs False
+    endServer <- runProcess "server-process" srvCmd srvCmdArgs False
 
     -- cheat to make sure that the server is ready
     dbg "waiting half a second"
@@ -227,7 +175,7 @@ benchWeb = scenario "bench-web" $ do
 
     dbg "starting client"
     (cliCmd, cliCmdArgs) <- httpClientShellCommand <$> httpClient
-    endClient <- shellCommand "client-process" cliCmd cliCmdArgs False
+    endClient <- runProcess "client-process" cliCmd cliCmdArgs False
 
     endClient Wait >> endServer Kill
 
@@ -235,20 +183,6 @@ benchWeb = scenario "bench-web" $ do
     liftIO . print =<< parseClientResults =<< httpClient
 
 {- analysis -}
-
-
-instance ToNamedRecord ParameterSet where
-  toNamedRecord prms = let pairs = M.toList prms
-                           validPairs = filter (isRecord . snd) pairs in
-    namedRecord $ map toBSpair validPairs
-  -- map toRecordPair . filter _ prms
-    where isRecord (NumberParam _) = True
-          isRecord (StringParam _) = True
-          isRecord _               = False
-
-          toBSpair (k, StringParam v) = namedField (encodeUtf8 k) v
-          toBSpair (k, NumberParam v) = let v' = fromRational v :: Double
-                                        in namedField (encodeUtf8 k) v'
 
 plotWeb :: ScenarioDescription EnvIO
 plotWeb = scenario "plot-web" $ do
@@ -263,25 +197,4 @@ runPlots = do
   destPath <- liftM (\x -> ePath x </> "plot.R") self
   let srcPath = "./scripts/r/plot-web/plot.R" 
   liftIO $ copyFile srcPath destPath
-  shellCommand "rplots" "R" ["-f", "plot.R"] True >>= ($ Wait)
-
-paramNames = S.fromList . concatMap (\e -> M.keys $ eParamSet e)
-
-headerNames extras = 
-    fmap encodeUtf8 . V.fromList . S.toList . S.union (S.fromList extras) . paramNames
-
-aggregateCSV res srcRes parser keys = do
-    b <- backend
-    ancestors <- eAncestors <$> self
-    let header = headerNames ("scenario.path":keys) ancestors
-    dump header =<< map transform <$> mapM (extract b) ancestors
-    where extract b exec = do
-            out <- pRead =<< (bResult b exec srcRes)
-            let path = ePath exec
-            let prms = eParamSet exec
-            let parsed = parser out
-            return (path, prms, parsed)
-          transform (path, prms, parsed) =
-            let pathRecord = namedRecord ["scenario.path" .= path]
-            in pathRecord <> toNamedRecord prms <> toNamedRecord parsed
-          dump header = writeResult res . toStrict . decodeUtf8 . encodeByName header 
+  runProcess "rplots" "R" ["-f", "plot.R"] True >>= ($ Wait)
