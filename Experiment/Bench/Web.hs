@@ -6,9 +6,18 @@
 
 module Experiment.Bench.Web (
     benchWeb
-  , plotWeb
-  , plotChart
+  , plotWithR
+  , plotWithChart
 ) where
+
+
+import Laborantin.DSL
+import Laborantin.Types
+import Laborantin.Implementation (EnvIO)
+import Experiment.Bench.Process
+import Experiment.Bench.CSV
+import Experiment.Bench.CDF
+import Experiment.Bench.Missing
 
 import Data.Csv (ToNamedRecord (..), namedRecord, (.=))
 import Data.Monoid ((<>))
@@ -17,29 +26,11 @@ import Data.Text (Text)
 import Data.Text.Read (decimal)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
-import Laborantin.DSL
-import Laborantin.Types
-import Laborantin.Implementation (EnvIO)
-import Control.Monad (void, liftM)
-import Control.Monad.IO.Class (liftIO)
-import Data.Maybe (catMaybes, fromMaybe)
-import qualified Data.Map as M
 
+import Control.Monad.IO.Class (liftIO)
 import System.Directory (copyFile)
-import System.FilePath.Posix ((</>))
 import Control.Concurrent (threadDelay)
 
-import Experiment.Bench.CSV
-import Experiment.Bench.Process
-
-import Graphics.Rendering.Chart
-import Data.Colour
-import Data.Colour.Names
-import Data.Default.Class
-import Graphics.Rendering.Chart.Backend.Diagrams
-import Control.Lens hiding ((.=))
-
-import Data.List (sort)
 
 type URL = Text
 type IterationCount = Int
@@ -146,6 +137,11 @@ instance ToNamedRecord (Maybe HttpPerformance) where
                                         "rps" .= rps, "n.successes" .= n]
   toNamedRecord Nothing = namedRecord []
 
+weightHttpOutput :: BoundResult HttpPerformance
+weightHttpOutput = BoundResult "client-process.out"
+                               (error "no encoder")
+                               (parseWeighttpOutput)
+
 parseClientResults :: Client -> Step EnvIO (Maybe HttpPerformance)
 parseClientResults (Weighttp _ _ _ _) = do
   content <- pRead =<< result "client-process.out"
@@ -164,8 +160,6 @@ parseWeighttpOutput content = HttpPerformance <$> rps <*> statuses
                     safeParseInt txt = either (const Nothing) (Just . fst) (decimal txt)
                     rps = findLine' "finished" >>= safeAtIndex 9 . T.words >>= safeParseInt
                     statuses = findLine' "status" >>= safeAtIndex 2 . T.words >>= safeParseInt
-
-
 
 {- actual experiment -}
 
@@ -194,87 +188,25 @@ benchWeb = scenario "bench-web" $ do
 
 {- analysis -}
 
-plotWeb :: ScenarioDescription EnvIO
-plotWeb = scenario "plot-web" $ do
-  describe "Plots the results for the web server benchmarks"
+plotWithR :: ScenarioDescription EnvIO
+plotWithR = scenario "plot-with-R" $ do
+  describe "Demonstrates how to call hand-written R scripts."
   require benchWeb "@sc.param 'client-name' == 'weighttp'"
-  -- todo: autogenerate this kind of scenario
   run $ do
     aggregateCSV "performance.csv" "client-process.out" parseWeighttpOutput ["rps" , "n.successes"]
-    runPlots
+    callR
+    where callR = do
+                  destPath <- resultPath "plot.R"
+                  let srcPath = "./scripts/r/plot-web/plot.R" 
+                  liftIO $ copyFile srcPath destPath
+                  runProcess "rplots" "R" ["-f", "plot.R"] True >>= ($ Wait)
 
-runPlots = do
-  destPath <- resultPath "plot.R"
-  let srcPath = "./scripts/r/plot-web/plot.R" 
-  liftIO $ copyFile srcPath destPath
-  runProcess "rplots" "R" ["-f", "plot.R"] True >>= ($ Wait)
-
-
-
-{- missing helpers -}
-
-resultPath :: FilePath -> Step EnvIO FilePath
-resultPath basename = liftM (\x -> ePath x </> basename) self
-
-
--- problem:
--- A)
--- * if executed, we can use shared memory to communicate the new results
--- * if loaded, we should load results anyway
--- B)
--- * use typeclass?
--- * use different typeclasses for read/show
-data BoundResult a = BoundResult FilePath (a -> Text) (Text -> Maybe a)
-
-produce :: BoundResult a -> a -> Step EnvIO ()
-produce (BoundResult name encode _) x = do
-    dbg $ "writing result " <> T.pack name
-    writeResult name . encode $ x
-
-consume :: BoundResult a -> Step EnvIO [(Execution EnvIO, Maybe a)]
-consume (BoundResult name _ decode) = do
-    ancestors <- eAncestors <$> self
-    mapM go ancestors
-    where go exec = do
-            dbg $ "reading " <> T.pack name <> " from " <> T.pack (ePath exec)
-            b <- backend
-            dat <- pRead =<< (bResult b exec name)
-            return (exec, decode dat)
-
-{- just-a-plot -}
-
-weightHttpOutput :: BoundResult HttpPerformance
-weightHttpOutput = BoundResult "client-process.out"
-                               (error "no encoder")
-                               (parseWeighttpOutput)
-
-plotChart :: ScenarioDescription EnvIO
-plotChart = scenario "plot-chart" $ do
-  describe "Plots something with chart"
+plotWithChart :: ScenarioDescription EnvIO
+plotWithChart = scenario "plot-with-chart" $ do
+  describe "Demonstrated the CDF helper with Chart."
   require benchWeb "@sc.param 'client-name' == 'weighttp'"
   run $ do
-    rawYs <- consume weightHttpOutput 
-    let ys = (fmap (fromIntegral . requestsPerSeconds) $ catMaybes $ (map snd rawYs))
-    runChart (zip [1..] (sort ys))
-
-setLinesBlue :: PlotLines a b -> PlotLines a b
-setLinesBlue = plot_lines_style . line_color .~ opaque blue
-
-runChart xs = do
-    svgPath <- resultPath "performance.svg"
-    chart <- buildChart xs
-    void . liftIO $ renderableToFile opts chart svgPath
-        where opts = FileOptions (800,600) SVG M.empty
-
-buildChart :: [(Double, Double)] -> Step EnvIO (Renderable ())
-buildChart xys = do
-  return $ toRenderable layout
-  where
-    rpsLine = plot_lines_values .~ [xys]
-              $ plot_lines_style . line_color .~ opaque blue
-              $ plot_lines_title .~ "am"
-              $ def
-
-    layout = layout_title .~ "Performance."
-           $ layout_plots .~ [toPlot rpsLine]
-           $ def
+    plotCDF "performance-cdf.svg"
+            weightHttpOutput (fromIntegral . requestsPerSeconds)
+            "bench-web results"
+            "Serving speed (req/s)" "Fraction of experiments"
