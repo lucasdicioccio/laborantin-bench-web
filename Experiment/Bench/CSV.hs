@@ -8,6 +8,7 @@ module Experiment.Bench.CSV (
 
 import Laborantin.DSL
 import Laborantin.Types
+import Laborantin.Implementation (EnvIO)
 import Data.Monoid ((<>))
 import Control.Applicative ((<$>))
 import Data.Text.Lazy.Encoding (decodeUtf8)
@@ -16,6 +17,7 @@ import Data.Text.Lazy (toStrict)
 import qualified Data.Map as M
 import qualified Data.Vector as V
 import qualified Data.Set as S
+import Data.Text (Text)
 import Data.Csv (ToNamedRecord (..), toField, namedRecord, namedField, (.=), encodeByName)
 
 instance ToNamedRecord ParameterSet where
@@ -36,6 +38,12 @@ paramNames = S.fromList . concatMap (\e -> M.keys $ eParamSet e)
 headerNames extras = 
     fmap encodeUtf8 . V.fromList . S.toList . S.union (S.fromList extras) . paramNames
 
+aggregateCSV :: (ToNamedRecord a)
+    => String
+    -> String
+    -> (Text -> a)
+    -> [Text]
+    -> Step EnvIO ()
 aggregateCSV res srcRes parser keys = do
     b <- backend
     ancestors <- eAncestors <$> self
