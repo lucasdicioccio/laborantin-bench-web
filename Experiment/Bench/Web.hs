@@ -7,6 +7,7 @@
 module Experiment.Bench.Web (
     benchWeb
   , plotWeb
+  , plotChart
 ) where
 
 import Data.Csv (ToNamedRecord (..), namedRecord, (.=))
@@ -21,7 +22,7 @@ import Laborantin.Types
 import Laborantin.Implementation (EnvIO)
 import Control.Monad (void, liftM)
 import Control.Monad.IO.Class (liftIO)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Map as M
 
 import System.Directory (copyFile)
@@ -30,6 +31,15 @@ import Control.Concurrent (threadDelay)
 
 import Experiment.Bench.CSV
 import Experiment.Bench.Process
+
+import Graphics.Rendering.Chart
+import Data.Colour
+import Data.Colour.Names
+import Data.Default.Class
+import Graphics.Rendering.Chart.Backend.Diagrams
+import Control.Lens hiding ((.=))
+
+import Data.List (sort)
 
 type URL = Text
 type IterationCount = Int
@@ -194,7 +204,77 @@ plotWeb = scenario "plot-web" $ do
     runPlots
 
 runPlots = do
-  destPath <- liftM (\x -> ePath x </> "plot.R") self
+  destPath <- resultPath "plot.R"
   let srcPath = "./scripts/r/plot-web/plot.R" 
   liftIO $ copyFile srcPath destPath
   runProcess "rplots" "R" ["-f", "plot.R"] True >>= ($ Wait)
+
+
+
+{- missing helpers -}
+
+resultPath :: FilePath -> Step EnvIO FilePath
+resultPath basename = liftM (\x -> ePath x </> basename) self
+
+
+-- problem:
+-- A)
+-- * if executed, we can use shared memory to communicate the new results
+-- * if loaded, we should load results anyway
+-- B)
+-- * use typeclass?
+-- * use different typeclasses for read/show
+data BoundResult a = BoundResult FilePath (a -> Text) (Text -> Maybe a)
+
+produce :: BoundResult a -> a -> Step EnvIO ()
+produce (BoundResult name encode _) x = do
+    dbg $ "writing result " <> T.pack name
+    writeResult name . encode $ x
+
+consume :: BoundResult a -> Step EnvIO [(Execution EnvIO, Maybe a)]
+consume (BoundResult name _ decode) = do
+    ancestors <- eAncestors <$> self
+    mapM go ancestors
+    where go exec = do
+            dbg $ "reading " <> T.pack name <> " from " <> T.pack (ePath exec)
+            b <- backend
+            dat <- pRead =<< (bResult b exec name)
+            return (exec, decode dat)
+
+{- just-a-plot -}
+
+weightHttpOutput :: BoundResult HttpPerformance
+weightHttpOutput = BoundResult "client-process.out"
+                               (error "no encoder")
+                               (parseWeighttpOutput)
+
+plotChart :: ScenarioDescription EnvIO
+plotChart = scenario "plot-chart" $ do
+  describe "Plots something with chart"
+  require benchWeb "@sc.param 'client-name' == 'weighttp'"
+  run $ do
+    rawYs <- consume weightHttpOutput 
+    let ys = (fmap (fromIntegral . requestsPerSeconds) $ catMaybes $ (map snd rawYs))
+    runChart (zip [1..] (sort ys))
+
+setLinesBlue :: PlotLines a b -> PlotLines a b
+setLinesBlue = plot_lines_style . line_color .~ opaque blue
+
+runChart xs = do
+    svgPath <- resultPath "performance.svg"
+    chart <- buildChart xs
+    void . liftIO $ renderableToFile opts chart svgPath
+        where opts = FileOptions (800,600) SVG M.empty
+
+buildChart :: [(Double, Double)] -> Step EnvIO (Renderable ())
+buildChart xys = do
+  return $ toRenderable layout
+  where
+    rpsLine = plot_lines_values .~ [xys]
+              $ plot_lines_style . line_color .~ opaque blue
+              $ plot_lines_title .~ "am"
+              $ def
+
+    layout = layout_title .~ "Performance."
+           $ layout_plots .~ [toPlot rpsLine]
+           $ def
